@@ -1,0 +1,51 @@
+name = "applying-myself-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Production environment
+[env.production]
+name = "applying-myself-api"
+vars = { ENVIRONMENT = "production" }
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "applying-myself-prod"
+database_id = "your-production-database-id"
+
+[[env.production.r2_buckets]]
+binding = "STORAGE"
+bucket_name = "applying-myself-files-prod"
+
+# Staging environment
+[env.staging]
+name = "applying-myself-api-staging"
+vars = { ENVIRONMENT = "staging" }
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "applying-myself-staging"
+database_id = "your-staging-database-id"
+
+[[env.staging.r2_buckets]]
+binding = "STORAGE"
+bucket_name = "applying-myself-files-staging"
+
+# Development environment (default)
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+[[env.development.d1_databases]]
+binding = "DB"
+database_name = "applying-myself-dev"
+database_id = "7b227a38-3d63-412a-82d5-5c5573f16306"
+
+[[env.development.r2_buckets]]
+binding = "STORAGE"
+bucket_name = "applying-myself-files-dev"
+
+# Environment variables (set these using wrangler secret put)
+# OPENAI_API_KEY - OpenAI API key for content generation
+# STRIPE_SECRET_KEY - Stripe secret key for payments
+# STRIPE_WEBHOOK_SECRET - Stripe webhook secret
+# JWT_SECRET - JWT signing secret

@@ -1,14 +1,36 @@
 {
-	"name": "job-app-backend",
+	"name": "applying-myself-api",
+	"version": "1.0.0",
+	"description": "applying-myself API with Hono framework",
+	"main": "src/index.ts",
 	"scripts": {
-		"dev": "wrangler dev",
-		"deploy": "wrangler deploy --minify",
-		"cf-typegen": "wrangler types --env-interface CloudflareBindings"
+		"dev": "wrangler dev --env development",
+		"dev:remote": "wrangler dev --remote --env development",
+		"deploy": "wrangler deploy",
+		"deploy:staging": "wrangler deploy --env staging",
+		"db:generate": "drizzle-kit generate:sqlite",
+		"db:migrate": "wrangler d1 execute applying-myself-dev --file=./drizzle/migrations/0000_initial.sql",
+		"db:studio": "drizzle-kit studio",
+		"db:migrate-stripe": "wrangler d1 execute applying-myself-dev --file=./scripts/migrate-stripe.sql",
+		"stripe:setup": "stripe listen --forward-to localhost:8787/api/webhooks/stripe",
+		"type-check": "tsc --noEmit",
+		"test": "vitest"
 	},
 	"dependencies": {
-		"hono": "^4.7.10"
+		"@hono/zod-validator": "^0.2.1",
+		"@tsndr/cloudflare-worker-jwt": "^2.4.0",
+		"bcryptjs": "^2.4.3",
+		"drizzle-orm": "^0.43.1",
+		"hono": "^3.12.8",
+		"stripe": "^14.9.0",
+		"zod": "^3.22.4"
 	},
 	"devDependencies": {
-		"wrangler": "^4.16.1"
+		"@cloudflare/workers-types": "^4.20231218.0",
+		"@types/bcryptjs": "^2.4.6",
+		"drizzle-kit": "^0.31.1",
+		"typescript": "^5.3.3",
+		"vitest": "^1.1.0",
+		"wrangler": "^3.19.0"
 	}
 }
