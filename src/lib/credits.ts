@@ -1,6 +1,28 @@
 import { eq, and, sql, desc } from 'drizzle-orm';
 import type { Database } from './db';
 import { users, apiUsage, creditTransactions } from '../db/schema';
+import type { CreditTransaction } from '../types/database';
+
+interface CreditStats {
+  currentBalance: number;
+  totalEarned: number;
+  totalSpent: number;
+  thisMonthSpent: number;
+}
+
+interface PlanLimits {
+  credits: number;
+  monthlyCredits: number;
+}
+
+interface SubscriptionLimits {
+  hasActiveSubscription: boolean;
+  planLimits: PlanLimits;
+  usage: {
+    credits: number;
+    monthlyCreditsUsed: number;
+  };
+}
 
 export class CreditManager {
   static readonly COSTS = {
@@ -24,52 +46,50 @@ export class CreditManager {
     userAgent?: string,
     sourceId?: string
   ): Promise<void> {
-    await db.transaction(async (tx) => {
-      // Get current balance
-      const user = await tx.select({ credits: users.credits })
-        .from(users)
-        .where(eq(users.id, userId))
-        .get();
+    // Get current balance
+    const user = await db.select({ credits: users.credits })
+      .from(users)
+      .where(eq(users.id, userId))
+      .get();
 
-      if (!user || (user.credits ?? 0) < amount) {
-        throw new Error('Insufficient credits');
-      }
+    if (!user || (user.credits ?? 0) < amount) {
+      throw new Error('Insufficient credits');
+    }
 
-      const newBalance = (user.credits ?? 0) - amount;
+    const newBalance = (user.credits ?? 0) - amount;
 
-      // Deduct credits from user
-      await tx.update(users)
-        .set({ 
-          credits: newBalance,
-          updatedAt: new Date().toISOString()
-        })
-        .where(eq(users.id, userId));
+    // Deduct credits from user
+    await db.update(users)
+      .set({ 
+        credits: newBalance,
+        updatedAt: new Date().toISOString()
+      })
+      .where(eq(users.id, userId));
 
-      // Log API usage
-      const usageId = crypto.randomUUID();
-      await tx.insert(apiUsage).values({
-        id: usageId,
-        userId,
-        endpoint,
-        creditsUsed: amount,
-        ipAddress,
-        userAgent,
-        success: true,
-        createdAt: new Date().toISOString()
-      });
+    // Log API usage
+    const usageId = crypto.randomUUID();
+    await db.insert(apiUsage).values({
+      id: usageId,
+      userId,
+      endpoint,
+      creditsUsed: amount,
+      ipAddress,
+      userAgent,
+      success: true,
+      createdAt: new Date().toISOString()
+    });
 
-      // Log credit transaction
-      await tx.insert(creditTransactions).values({
-        id: crypto.randomUUID(),
-        userId,
-        type: 'spent',
-        amount: -amount, // Negative for spent
-        balance: newBalance,
-        source: 'api_usage',
-        sourceId: sourceId || usageId,
-        description: `Credits used for ${endpoint}`,
-        createdAt: new Date().toISOString()
-      });
+    // Log credit transaction
+    await db.insert(creditTransactions).values({
+      id: crypto.randomUUID(),
+      userId,
+      type: 'spent',
+      amount: -amount, // Negative for spent
+      balance: newBalance,
+      source: 'api_usage',
+      sourceId: sourceId || usageId,
+      description: `Credits used for ${endpoint}`,
+      createdAt: new Date().toISOString()
     });
   }
 
@@ -86,39 +106,37 @@ export class CreditManager {
     sourceId?: string,
     description?: string
   ): Promise<void> {
-    await db.transaction(async (tx) => {
-      // Get current balance
-      const user = await tx.select({ credits: users.credits })
-        .from(users)
-        .where(eq(users.id, userId))
-        .get();
+    // Get current balance
+    const user = await db.select({ credits: users.credits })
+      .from(users)
+      .where(eq(users.id, userId))
+      .get();
 
-      if (!user) {
-        throw new Error('User not found');
-      }
+    if (!user) {
+      throw new Error('User not found');
+    }
 
-      const newBalance = (user.credits ?? 0) + amount;
+    const newBalance = (user.credits ?? 0) + amount;
 
-      // Add credits to user
-      await tx.update(users)
-        .set({ 
-          credits: newBalance,
-          updatedAt: new Date().toISOString()
-        })
-        .where(eq(users.id, userId));
+    // Add credits to user
+    await db.update(users)
+      .set({ 
+        credits: newBalance,
+        updatedAt: new Date().toISOString()
+      })
+      .where(eq(users.id, userId));
 
-      // Log credit transaction
-      await tx.insert(creditTransactions).values({
-        id: crypto.randomUUID(),
-        userId,
-        type: 'earned',
-        amount: amount, // Positive for earned
-        balance: newBalance,
-        source,
-        sourceId,
-        description: description || `${amount} credits added from ${source}`,
-        createdAt: new Date().toISOString()
-      });
+    // Log credit transaction
+    await db.insert(creditTransactions).values({
+      id: crypto.randomUUID(),
+      userId,
+      type: 'earned',
+      amount: amount, // Positive for earned
+      balance: newBalance,
+      source,
+      sourceId,
+      description: description || `${amount} credits added from ${source}`,
+      createdAt: new Date().toISOString()
     });
   }
 
@@ -128,26 +146,24 @@ export class CreditManager {
     planCredits: number,
     reason: string = 'subscription_renewal'
   ): Promise<void> {
-    await db.transaction(async (tx) => {
-      // Set credits to plan amount
-      await tx.update(users)
-        .set({ 
-          credits: planCredits,
-          updatedAt: new Date().toISOString()
-        })
-        .where(eq(users.id, userId));
+    // Set credits to plan amount
+    await db.update(users)
+      .set({ 
+        credits: planCredits,
+        updatedAt: new Date().toISOString()
+      })
+      .where(eq(users.id, userId));
 
-      // Log credit transaction
-      await tx.insert(creditTransactions).values({
-        id: crypto.randomUUID(),
-        userId,
-        type: 'earned',
-        amount: planCredits,
-        balance: planCredits,
-        source: 'subscription',
-        description: `Credits reset to ${planCredits} for ${reason}`,
-        createdAt: new Date().toISOString()
-      });
+    // Log credit transaction
+    await db.insert(creditTransactions).values({
+      id: crypto.randomUUID(),
+      userId,
+      type: 'earned',
+      amount: planCredits,
+      balance: planCredits,
+      source: 'subscription',
+      description: `Credits reset to ${planCredits} for ${reason}`,
+      createdAt: new Date().toISOString()
     });
   }
 
@@ -155,7 +171,7 @@ export class CreditManager {
     db: Database, 
     userId: string, 
     limit: number = 50
-  ): Promise<any[]> {
+  ): Promise<CreditTransaction[]> {
     return await db.select()
       .from(creditTransactions)
       .where(eq(creditTransactions.userId, userId))
@@ -163,12 +179,7 @@ export class CreditManager {
       .limit(limit);
   }
 
-  static async getCreditStats(db: Database, userId: string): Promise<{
-    currentBalance: number;
-    totalEarned: number;
-    totalSpent: number;
-    thisMonthSpent: number;
-  }> {
+  static async getCreditStats(db: Database, userId: string): Promise<CreditStats> {
     const user = await db.select({ credits: users.credits })
       .from(users)
       .where(eq(users.id, userId))
@@ -212,18 +223,17 @@ export class CreditManager {
     };
   }
 
-  static async checkSubscriptionLimits(db: Database, userId: string): Promise<{
-    hasActiveSubscription: boolean;
-    planLimits: any;
-    usage: any;
-  }> {
+  static async checkSubscriptionLimits(db: Database, userId: string): Promise<SubscriptionLimits> {
     const user = await db.select().from(users).where(eq(users.id, userId)).get();
     
     if (!user || user.plan === 'free') {
       return {
         hasActiveSubscription: false,
-        planLimits: { credits: 3 },
-        usage: { credits: user?.credits ?? 0 }
+        planLimits: { credits: 3, monthlyCredits: 3 },
+        usage: { 
+          credits: user?.credits ?? 0,
+          monthlyCreditsUsed: 0
+        }
       };
     }
 
@@ -253,7 +263,7 @@ export class CreditManager {
     };
   }
 
-  private static getPlanLimits(plan: string) {
+  private static getPlanLimits(plan: string): PlanLimits {
     const limits = {
       free: { credits: 3, monthlyCredits: 3 },
       starter: { credits: 50, monthlyCredits: 50 },

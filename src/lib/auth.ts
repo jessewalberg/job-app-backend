@@ -1,69 +1,60 @@
-import jwt from '@tsndr/cloudflare-worker-jwt';
+import { sign, verify } from '@tsndr/cloudflare-worker-jwt';
 import bcrypt from 'bcryptjs';
-import type { Context } from 'hono';
-import type { Env, JWTPayload } from '../types/env';
+import type { Context, MiddlewareHandler } from 'hono';
+import { getConfig } from './config';
+import type { JWTPayload, AppEnv } from '../types/env';
 
 export async function hashPassword(password: string): Promise<string> {
-  return await bcrypt.hash(password, 10);
+  return await bcrypt.hash(password, 12);
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
   return await bcrypt.compare(password, hash);
 }
 
-export async function generateToken(payload: JWTPayload, secret: string): Promise<string> {
-  const tokenPayload = {
+export async function generateToken(payload: Omit<JWTPayload, 'iat' | 'exp'>, secret: string): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const fullPayload: JWTPayload = {
     ...payload,
-    iat: Math.floor(Date.now() / 1000),
-    exp: Math.floor(Date.now() / 1000) + (7 * 24 * 60 * 60) // 7 days
+    iat: now,
+    exp: now + (7 * 24 * 60 * 60) // 7 days
   };
-
-  return await jwt.sign(tokenPayload, secret, { algorithm: 'HS256' });
+  
+  return await sign(fullPayload, secret);
 }
 
 export async function verifyToken(token: string, secret: string): Promise<JWTPayload> {
-  const isValid = await jwt.verify(token, secret, { algorithm: 'HS256' });
+  const isValid = await verify(token, secret);
   if (!isValid) {
     throw new Error('Invalid token');
   }
   
-  const decoded = jwt.decode(token);
-  return decoded.payload as JWTPayload;
+  const payload = JSON.parse(atob(token.split('.')[1])) as JWTPayload;
+  return payload;
 }
 
-export async function requireAuth(c: Context<{ Bindings: Env; Variables: { user: JWTPayload } }>, next: () => Promise<void>) {
+export const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   const authHeader = c.req.header('Authorization');
-  
-  if (!authHeader?.startsWith('Bearer ')) {
-    return c.json({ 
-      success: false, 
-      error: 'Authentication required' 
-    }, 401);
+  console.log('authHeader', authHeader);
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return c.json({ error: 'Missing or invalid authorization header' }, 401);
   }
-
+  
+  const token = authHeader.substring(7);
+  
   try {
-    const token = authHeader.substring(7);
-    const payload = await verifyToken(token, c.env.JWT_SECRET);
+    const config = getConfig();
+    const payload = await verifyToken(token, config.jwt.secret);
     
     // Check if token is expired
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      return c.json({ 
-        success: false,
-        error: 'Token expired' 
-      }, 401);
+      return c.json({ error: 'Token expired' }, 401);
     }
     
     c.set('user', payload);
     await next();
   } catch (error) {
     console.error('Auth error:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Invalid token' 
-    }, 401);
+    return c.json({ error: 'Invalid token' }, 401);
   }
-}
-
-export function generateUUID(): string {
-  return crypto.randomUUID();
-}
+};

@@ -53,18 +53,36 @@ userRoutes.put('/profile', zValidator('json', updateUserSchema), async (c) => {
     const { name, email } = c.req.valid('json');
     const db = createDB(c.env);
 
-    // Check if email is already taken by another user
+    // Validate input
+    if (!name && !email) {
+      return c.json({ error: 'At least one field (name or email) is required' }, 400);
+    }
+
+    if (name && name.length < 2) {
+      return c.json({ error: 'Name must be at least 2 characters' }, 400);
+    }
+
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return c.json({ error: 'Invalid email format' }, 400);
+    }
+
+    // Check if email is already taken
     if (email) {
-      const existingUser = await db.select().from(users)
-        .where(eq(users.email, email)).get();
+      const existingUser = await db.select().from(users).where(eq(users.email, email)).get();
       
       if (existingUser && existingUser.id !== user.userId) {
         return c.json({ error: 'Email already taken' }, 409);
       }
     }
 
-    // Update user
-    const updateData: any = {
+    // Update user - create proper typed update object
+    interface UserUpdateData {
+      updatedAt: string;
+      name?: string;
+      email?: string;
+    }
+    
+    const updateData: UserUpdateData = {
       updatedAt: new Date().toISOString()
     };
     

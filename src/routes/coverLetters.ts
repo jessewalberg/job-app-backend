@@ -1,126 +1,139 @@
 import { Hono } from 'hono';
 import { zValidator } from '@hono/zod-validator';
 import { eq, desc } from 'drizzle-orm';
-import { createDB } from '../lib/db';
-import { requireAuth } from '../lib/auth';
 import { AIService } from '../lib/ai';
 import { CreditManager } from '../lib/credits';
-import { generateCoverLetterSchema } from '../lib/validation';
-import { coverLetters, resumes, users } from '../db/schema';
-import type { Env, JWTPayload } from '../types/env';
+import { generateCoverLetterSchema, paginationSchema } from '../lib/validation';
+import { coverLetters, resumes } from '../db/schema';
+import { authContextMiddleware, getAuthContext } from '../middleware/authContext';
+import { creditCheckMiddleware, deductCreditsAfterOperation } from '../middleware/creditCheck';
+import { sendSuccess, sendError, sendNotFound, handleError } from '../lib/responses';
+import { getConfig } from '../lib/config';
+import type { AppEnv } from '../types/env';
 
-const coverLetterRoutes = new Hono<{ Bindings: Env; Variables: { user: JWTPayload } }>();
+const coverLetterRoutes = new Hono<AppEnv>();
 
-coverLetterRoutes.use('*', requireAuth);
+// All routes require authentication
+coverLetterRoutes.use('*', authContextMiddleware);
 
-coverLetterRoutes.post('/generate-from-content', zValidator('json', generateCoverLetterSchema), async (c) => {
-  try {
-    const { extractedContent, resumeId, preferences } = c.req.valid('json');
-    const user = c.get('user');
-    const db = createDB(c.env);
-
-    // Check credits
-    const hasCredits = await CreditManager.checkCredits(db, user.userId, CreditManager.COSTS.COVER_LETTER_GENERATION);
-    if (!hasCredits) {
-      return c.json({ error: 'Insufficient credits' }, 402);
-    }
-
-    // Get resume
-    const resume = await db.select().from(resumes)
-      .where(eq(resumes.id, resumeId)).get();
+// Generate cover letter
+coverLetterRoutes.post('/generate', 
+  creditCheckMiddleware.coverLetterGeneration,
+  zValidator('json', generateCoverLetterSchema), 
+  async (c) => {
+    const startTime = Date.now();
     
-    if (!resume || resume.userId !== user.userId) {
-      return c.json({ error: 'Resume not found' }, 404);
-    }
+    try {
+      const { extractedContent, resumeId, preferences } = c.req.valid('json');
+      const { user, db } = getAuthContext(c);
+      const config = getConfig();
 
-    // Get resume content from R2 or use extracted text
-    let resumeContent = resume.extractedText;
-    if (!resumeContent) {
-      const resumeFile = await c.env.BUCKET.get(resume.fileKey);
+      // Get resume
+      const resume = await db.select()
+        .from(resumes)
+        .where(eq(resumes.id, resumeId))
+        .get();
+
+      if (!resume || resume.userId !== user.userId) {
+        return sendNotFound(c, 'Resume not found');
+      }
+
+      // Get resume content from R2
+      console.log(config.storage.bucket)
+      const resumeFile = await config.storage.bucket.get(resume.fileKey);
       if (!resumeFile) {
-        return c.json({ error: 'Resume file not found' }, 404);
+        return sendError(c, 'Resume file not found', 404);
       }
-      resumeContent = await resumeFile.text();
-    }
 
-    // Generate cover letter
-    const ai = new AIService(c.env.OPENAI_API_KEY);
-    const coverLetterContent = await ai.generateCoverLetter(extractedContent, resumeContent, preferences);
+      // Check MIME type and read file appropriately
+      const ai = new AIService();
+      let resumeText: string;
+      if (resume.mimeType.includes('pdf')) {
+        // For PDFs, we need to extract text using AI service
+        const fileBuffer = await resumeFile.arrayBuffer();
+        // Convert ArrayBuffer to base64 using Web APIs
+        const uint8Array = new Uint8Array(fileBuffer);
+        const binaryString = Array.from(uint8Array, byte => String.fromCharCode(byte)).join('');
+        const base64Content = btoa(binaryString);
+        resumeText = await ai.extractTextFromResume(base64Content, resume.mimeType);
+      } else {
+        // For text-based files, we can read as text
+        resumeText = await resumeFile.text();
+      }
 
-    // Save cover letter
-    const coverLetterId = crypto.randomUUID();
-    await db.insert(coverLetters).values({
-      id: coverLetterId,
-      userId: user.userId,
-      resumeId,
-      content: coverLetterContent.content,
-      creditsUsed: CreditManager.COSTS.COVER_LETTER_GENERATION,
-      createdAt: new Date().toISOString()
-    });
+      // Generate cover letter using AI
+      const result = await ai.generateCoverLetter(extractedContent, resumeText, preferences);
 
-    // Deduct credits
-    await CreditManager.deductCredits(
-      db, 
-      user.userId, 
-      CreditManager.COSTS.COVER_LETTER_GENERATION, 
-      'generate-from-content',
-      c.req.header('CF-Connecting-IP'),
-      c.req.header('User-Agent')
-    );
-
-    // Get updated user credits
-    const updatedUser = await db.select().from(users).where(eq(users.id, user.userId)).get();
-
-    return c.json({
-      success: true,
-      data: {
+      // Save cover letter to database
+      const coverLetterId = crypto.randomUUID();
+      const newCoverLetter = await db.insert(coverLetters).values({
         id: coverLetterId,
-        content: coverLetterContent.content,
+        userId: user.userId,
+        resumeId,
+        jobTitle: extractedContent.title || null,
+        company: extractedContent.company || null,
+        content: result.content,
         creditsUsed: CreditManager.COSTS.COVER_LETTER_GENERATION,
-        remainingCredits: updatedUser?.credits || 0
+        preferences: preferences ? JSON.stringify(preferences) : null,
+        createdAt: new Date().toISOString()
+      }).returning();
+
+      // Deduct credits and get remaining
+      const responseTime = Date.now() - startTime;
+      const remainingCredits = await deductCreditsAfterOperation(
+        c,
+        CreditManager.COSTS.COVER_LETTER_GENERATION,
+        'generate-cover-letter',
+        responseTime
+      );
+
+      return sendSuccess(c, {
+        coverLetter: newCoverLetter[0],
+        tokensUsed: result.tokensUsed,
+        remainingCredits
+      }, 201);
+
+    } catch (error) {
+      return handleError(c, error, 'Cover letter generation failed');
+    }
+  }
+);
+
+// Get user's cover letters
+coverLetterRoutes.get('/', zValidator('query', paginationSchema), async (c) => {
+  try {
+    const { user, db } = getAuthContext(c);
+    const { page, limit } = c.req.valid('query');
+
+    const offset = (page - 1) * limit;
+
+    const userCoverLetters = await db.select()
+      .from(coverLetters)
+      .where(eq(coverLetters.userId, user.userId))
+      .orderBy(desc(coverLetters.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return sendSuccess(c, {
+      coverLetters: userCoverLetters,
+      pagination: {
+        page,
+        limit,
+        total: userCoverLetters.length,
+        hasMore: userCoverLetters.length === limit
       }
     });
 
   } catch (error) {
-    console.error('Cover letter generation error:', error);
-    return c.json({ error: 'Failed to generate cover letter' }, 500);
+    return handleError(c, error, 'Failed to fetch cover letters');
   }
 });
 
-coverLetterRoutes.get('/history', async (c) => {
-  try {
-    const user = c.get('user');
-    const db = createDB(c.env);
-
-    const coverLetterHistory = await db.select({
-      id: coverLetters.id,
-      content: coverLetters.content,
-      creditsUsed: coverLetters.creditsUsed,
-      createdAt: coverLetters.createdAt,
-      resumeFilename: resumes.filename
-    })
-    .from(coverLetters)
-    .leftJoin(resumes, eq(coverLetters.resumeId, resumes.id))
-    .where(eq(coverLetters.userId, user.userId))
-    .orderBy(desc(coverLetters.createdAt))
-    .limit(50);
-
-    return c.json({
-      success: true,
-      data: coverLetterHistory
-    });
-
-  } catch (error) {
-    console.error('Get cover letter history error:', error);
-    return c.json({ error: 'Failed to get cover letter history' }, 500);
-  }
-});
-
+// Get specific cover letter
 coverLetterRoutes.get('/:id', async (c) => {
   try {
+    const { user, db } = getAuthContext(c);
     const coverLetterId = c.req.param('id');
-    const user = c.get('user');
-    const db = createDB(c.env);
 
     const coverLetter = await db.select()
       .from(coverLetters)
@@ -128,46 +141,34 @@ coverLetterRoutes.get('/:id', async (c) => {
       .get();
 
     if (!coverLetter || coverLetter.userId !== user.userId) {
-      return c.json({ error: 'Cover letter not found' }, 404);
+      return sendNotFound(c, 'Cover letter not found');
     }
 
-    return c.json({
-      success: true,
-      data: coverLetter
-    });
+    return sendSuccess(c, coverLetter);
 
   } catch (error) {
-    console.error('Get cover letter error:', error);
-    return c.json({ error: 'Failed to get cover letter' }, 500);
+    return handleError(c, error, 'Failed to fetch cover letter');
   }
 });
 
+// Delete cover letter
 coverLetterRoutes.delete('/:id', async (c) => {
   try {
+    const { user, db } = getAuthContext(c);
     const coverLetterId = c.req.param('id');
-    const user = c.get('user');
-    const db = createDB(c.env);
 
     const result = await db.delete(coverLetters)
       .where(eq(coverLetters.id, coverLetterId))
       .returning();
 
-    if (result.length === 0) {
-      return c.json({ error: 'Cover letter not found' }, 404);
+    if (result.length === 0 || result[0].userId !== user.userId) {
+      return sendNotFound(c, 'Cover letter not found');
     }
 
-    if (result[0].userId !== user.userId) {
-      return c.json({ error: 'Unauthorized' }, 403);
-    }
-
-    return c.json({
-      success: true,
-      message: 'Cover letter deleted successfully'
-    });
+    return sendSuccess(c, { message: 'Cover letter deleted successfully' });
 
   } catch (error) {
-    console.error('Delete cover letter error:', error);
-    return c.json({ error: 'Failed to delete cover letter' }, 500);
+    return handleError(c, error, 'Failed to delete cover letter');
   }
 });
 

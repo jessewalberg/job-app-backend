@@ -1,3 +1,6 @@
+import { getConfig } from './config';
+import type { JobExtractionData, CoverLetterPreferences } from '../types/database';
+
 interface OpenAIUsage {
   prompt_tokens: number;
   completion_tokens: number;
@@ -25,44 +28,45 @@ interface OpenAIResponse {
 }
 
 export class AIService {
-    constructor(private apiKey: string) {}
+    private readonly apiKey: string;
+
+    constructor() {
+      const config = getConfig();
+      this.apiKey = config.openai.apiKey;
+    }
   
     async extractJobFromHTML(html: string, url: string, title: string, maxTokens = 15000) {
       const cleanedHtml = this.cleanHTML(html, maxTokens);
       
       const prompt = `
-  You are an expert content analyzer. Extract relevant information from this webpage content.
-  
-  URL: ${url}
-  Page Title: ${title}
-  
-  Analyze the content and extract information in this JSON format:
-  {
-    "title": "Job title or main content title",
-    "company": "Company name if mentioned",
-    "location": "Location if mentioned", 
-    "salary": "Salary or compensation if mentioned",
-    "jobType": "Employment type (full-time, part-time, contract, etc.)",
-    "experience": "Experience level if mentioned (entry, mid, senior, etc.)",
-    "description": "Brief summary of main content (2-3 sentences)",
-    "requirements": ["List of requirements or key points"],
-    "skills": ["Skills, technologies, or qualifications mentioned"],
-    "benefits": ["Benefits, perks, or advantages mentioned"],
-    "industry": "Industry or sector if identifiable",
-    "remote": "Remote work policy if mentioned",
-    "pageType": "Type of page: job, company, product, article, or general"
-  }
-  
-  Instructions:
-  - Only include fields where information is clearly available
-  - Use null for missing information
-  - Focus on extracting factual information from the content
-  - For arrays, include only distinct, relevant items
-  - Keep descriptions concise but informative
-  
-  Content:
-  ${cleanedHtml}
-  `;
+Analyze this job posting content and extract structured information. Return ONLY valid JSON with these exact fields:
+
+{
+  "title": "exact job title",
+  "company": "company name",
+  "location": "location (city, state/country)",
+  "salary": "salary range or compensation",
+  "jobType": "full-time/part-time/contract/internship",
+  "experience": "experience level required",
+  "requirements": ["requirement 1", "requirement 2"],
+  "description": "brief job description (2-3 sentences)",
+  "benefits": ["benefit 1", "benefit 2"],
+  "skills": ["skill 1", "skill 2"],
+  "industry": "industry/sector",
+  "remote": "remote/hybrid/on-site",
+  "pageType": "job" or "general",
+  "confidence": 0.8,
+  "url": "${url}",
+  "domain": "${new URL(url).hostname}"
+}
+
+Content to analyze:
+Title: ${title}
+URL: ${url}
+Content: ${cleanedHtml}
+
+Use your best judgement to extract the information. Use null for missing fields. Set pageType to "job" if this is clearly a job posting, "general" otherwise.
+`;
   
       try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -98,7 +102,7 @@ export class AIService {
         const extractedText = result.choices[0].message.content;
   
         // Parse JSON response
-        let jobData;
+        let jobData: JobExtractionData;
         try { 
           jobData = JSON.parse(extractedText);
         } catch (parseError) {
@@ -114,10 +118,10 @@ export class AIService {
   
         // Calculate confidence score based on extracted fields
         const fields = Object.keys(jobData).filter(key => 
-          jobData[key] !== null && 
-          jobData[key] !== '' && 
-          jobData[key] !== undefined &&
-          !(Array.isArray(jobData[key]) && jobData[key].length === 0)
+          jobData[key as keyof JobExtractionData] !== null && 
+          jobData[key as keyof JobExtractionData] !== '' && 
+          jobData[key as keyof JobExtractionData] !== undefined &&
+          !(Array.isArray(jobData[key as keyof JobExtractionData]) && (jobData[key as keyof JobExtractionData] as unknown[]).length === 0)
         );
         
         // Higher confidence for more fields and job-specific content
@@ -146,47 +150,47 @@ export class AIService {
       }
     }
   
-    async generateCoverLetter(jobData: any, resumeText: string, preferences: any = {}) {
+    async generateCoverLetter(jobData: JobExtractionData, resumeText: string, preferences: CoverLetterPreferences = {}) {
       // Truncate resume text to avoid token limits
       const truncatedResume = resumeText.substring(0, 8000);
       
       const prompt = `
-  You are an expert cover letter writer with 15+ years of experience. Create a personalized, compelling cover letter based on the job information and candidate's resume.
-  
-  Job Information:
-  ${JSON.stringify(jobData, null, 2)}
-  
-  Resume Content:
-  ${truncatedResume}
-  
-  Writing Preferences:
-  - Tone: ${preferences.tone || 'professional'}
-  - Focus: ${preferences.focus || 'experience'}
-  - Length: ${preferences.length || 'medium'}
-  
-  Create a compelling cover letter that:
-  1. Opens with enthusiasm for the specific role and company
-  2. Connects the candidate's experience directly to job requirements
-  3. Highlights 2-3 most relevant achievements with quantifiable results
-  4. Shows genuine knowledge of the company/industry
-  5. Uses the specified tone throughout
-  6. Ends with a confident call to action
-  7. Length guidelines:
-     - Short: 2-3 paragraphs (200-300 words)
-     - Medium: 3-4 paragraphs (300-450 words)
-     - Long: 4-5 paragraphs (450-600 words)
-  
-  Important guidelines:
-  - Write in first person as the candidate
-  - Be specific and avoid generic phrases
-  - Match the company's culture and tone if evident
-  - Include relevant keywords from the job posting
-  - Format as clean, readable text
-  - No placeholder text or brackets
-  - Professional closing with candidate's interest in next steps
-  
-  Generate the cover letter now:
-  `;
+You are an expert cover letter writer with 15+ years of experience. Create a personalized, compelling cover letter based on the job information and candidate's resume.
+
+Job Information:
+${JSON.stringify(jobData, null, 2)}
+
+Resume Content:
+${truncatedResume}
+
+Writing Preferences:
+- Tone: ${preferences.tone || 'professional'}
+- Focus: ${preferences.focus || 'experience'}
+- Length: ${preferences.length || 'medium'}
+
+Create a compelling cover letter that:
+1. Opens with enthusiasm for the specific role and company
+2. Connects the candidate's experience directly to job requirements
+3. Highlights 2-3 most relevant achievements with quantifiable results
+4. Shows genuine knowledge of the company/industry
+5. Uses the specified tone throughout
+6. Ends with a confident call to action
+7. Length guidelines:
+   - Short: 2-3 paragraphs (200-300 words)
+   - Medium: 3-4 paragraphs (300-450 words)
+   - Long: 4-5 paragraphs (450-600 words)
+
+Important guidelines:
+- Write in first person as the candidate
+- Be specific and avoid generic phrases
+- Match the company's culture and tone if evident
+- Include relevant keywords from the job posting
+- Format as clean, readable text
+- No placeholder text or brackets
+- Professional closing with candidate's interest in next steps
+
+Generate the cover letter now:
+`;
   
       try {
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -232,13 +236,13 @@ export class AIService {
     }
   
     async extractTextFromResume(fileContent: string, mimeType: string): Promise<string> {
-      // For now, return the file content as-is since it's likely already text
-      // In a production app, you'd use different parsing based on mimeType
       if (mimeType.includes('pdf')) {
-        // Would use a PDF parser here
-        return fileContent;
+        // For PDFs, we need a proper PDF parser. For now, return a placeholder
+        // In production, you would use a library like pdf-parse or pdf2pic + OCR
+        console.warn('PDF text extraction not fully implemented. Consider using a PDF parsing library.');
+        return `[PDF Resume Content - ${mimeType}]\n\nNote: This is a PDF file. Text extraction from PDFs requires additional processing. Please ensure your resume content is accessible for the best cover letter generation results.`;
       } else if (mimeType.includes('word')) {
-        // Would use a Word document parser here
+        // For Word documents, return as-is for now (would need proper parser)
         return fileContent;
       } else {
         // Plain text or other formats

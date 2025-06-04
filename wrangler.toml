@@ -14,8 +14,16 @@ database_name = "applying-myself-prod"
 database_id = "your-production-database-id"
 
 [[env.production.r2_buckets]]
-binding = "STORAGE"
+binding = "BUCKET"
 bucket_name = "applying-myself-files-prod"
+
+[[env.production.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "your-production-rate-limit-kv-id"
+
+[[env.production.kv_namespaces]]
+binding = "EXTENSION_KV"
+id = "your-production-extension-kv-id"
 
 # Staging environment
 [env.staging]
@@ -28,8 +36,16 @@ database_name = "applying-myself-staging"
 database_id = "your-staging-database-id"
 
 [[env.staging.r2_buckets]]
-binding = "STORAGE"
+binding = "BUCKET"
 bucket_name = "applying-myself-files-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "your-staging-rate-limit-kv-id"
+
+[[env.staging.kv_namespaces]]
+binding = "EXTENSION_KV"
+id = "your-staging-extension-kv-id"
 
 # Development environment (default)
 [env.development]
@@ -39,10 +55,22 @@ vars = { ENVIRONMENT = "development" }
 binding = "DB"
 database_name = "applying-myself-dev"
 database_id = "7b227a38-3d63-412a-82d5-5c5573f16306"
+preview_database_id = "aa63743a-7d18-4205-9283-70f61be2f763"
 
 [[env.development.r2_buckets]]
-binding = "STORAGE"
+binding = "BUCKET"
 bucket_name = "applying-myself-files-dev"
+preview_bucket_name = "applying-myself-files-preview"
+
+[[env.development.kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "6346900891384170b0c1207921de5760"
+preview_id = "689a5dce9183465496937d202f59de17"
+
+[[env.development.kv_namespaces]]
+binding = "EXTENSION_KV"
+id = "622c43fb844842128ec7b20a38c84c29"
+preview_id = "7cb7018161c94c589931895ded5025dc"
 
 # Environment variables (set these using wrangler secret put)
 # OPENAI_API_KEY - OpenAI API key for content generation

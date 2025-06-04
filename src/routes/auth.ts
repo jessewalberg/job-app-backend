@@ -1,221 +1,194 @@
 import { Hono } from 'hono';
-import { zValidator } from '@hono/zod-validator';
 import { eq } from 'drizzle-orm';
-import { createDB } from '../lib/db';
-import { hashPassword, verifyPassword, generateToken, generateUUID, requireAuth } from '../lib/auth';
+import { hashPassword, verifyPassword, generateToken, requireAuth } from '../lib/auth';
+import { validateRequestBody, ValidationError } from '../lib/validationHelper';
 import { registerSchema, loginSchema, updateUserSchema } from '../lib/validation';
 import { users } from '../db/schema';
-import type { Env } from '../types/env';
+import { databaseMiddleware } from '../middleware/database';
+import { sendSuccess, sendError, sendValidationError, sendUnauthorized, handleError } from '../lib/responses';
+import { getConfig } from '../lib/config';
+import type { AppEnv } from '../types/env';
 
-const auth = new Hono<{ Bindings: Env }>();
+const auth = new Hono<AppEnv>();
+
+// Apply database middleware to all routes
+auth.use('*', databaseMiddleware);
 
 // Register new user
-auth.post('/register', zValidator('json', registerSchema), async (c) => {
-  console.log('register', c.env)
+auth.post('/register', async (c) => {
   try {
-    const { name, email, password } = c.req.valid('json');
-    const db = createDB(c.env);
-    console.log(c.env)
+    const db = c.get('db');
+    if (!db) {
+      throw new Error('Database not available');
+    }
+    
+    const body = await validateRequestBody(c, registerSchema);
+    const { email, password, name } = body;
+
     // Check if user already exists
     const existingUser = await db.select().from(users).where(eq(users.email, email)).get();
-    console.log('existingUser', existingUser);
     if (existingUser) {
-      return c.json({ 
-        success: false, 
-        error: 'User already exists with this email' 
-      }, 409);
+      return sendValidationError(c, 'User with this email already exists');
     }
 
-    // Create new user
-    const passwordHash = await hashPassword(password);
-    const userId = generateUUID();
+    // Hash password and create user
+    const hashedPassword = await hashPassword(password);
+    const userId = crypto.randomUUID();
     
     const newUser = await db.insert(users).values({
       id: userId,
       email,
+      passwordHash: hashedPassword,
       name,
-      passwordHash,
-      credits: 3, // Free tier starts with 3 credits
       plan: 'free',
+      credits: 10, // Free tier credits
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }).returning();
 
     // Generate JWT token
-    const token = await generateToken({ 
-      userId, 
-      email, 
-      plan: 'free' 
-    }, c.env.JWT_SECRET);
+    const config = getConfig();
+    const token = await generateToken({
+      userId: newUser[0].id,
+      email: newUser[0].email,
+      plan: newUser[0].plan || 'free'
+    }, config.jwt.secret);
 
-    return c.json({
-      success: true,
-      data: {
-        token,
-        user: {
-          id: userId,
-          email,
-          name,
-          credits: 3,
-          plan: 'free',
-          createdAt: newUser[0].createdAt
-        }
+    return sendSuccess(c, {
+      token,
+      user: {
+        id: newUser[0].id,
+        email: newUser[0].email,
+        name: newUser[0].name,
+        plan: newUser[0].plan || 'free',
+        credits: newUser[0].credits || 0
       }
     }, 201);
 
   } catch (error) {
-    console.error('Registration error:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Registration failed' 
-    }, 500);
+    if (error instanceof ValidationError) {
+      return sendValidationError(c, error.message, error.errors);
+    }
+    return handleError(c, error, 'Registration failed');
   }
 });
 
 // Login user
-auth.post('/login', zValidator('json', loginSchema), async (c) => {
-  console.log(c.env)
+auth.post('/login', async (c) => {
   try {
-    const { email, password } = c.req.valid('json');
-    const db = createDB(c.env);
+    const db = c.get('db');
+    if (!db) {
+      throw new Error('Database not available');
+    }
+    
+    const body = await validateRequestBody(c, loginSchema);
+    const { email, password } = body;
 
-    // Find user by email
+    // Find user
     const user = await db.select().from(users).where(eq(users.email, email)).get();
     if (!user) {
-      return c.json({ 
-        success: false, 
-        error: 'Invalid email or password' 
-      }, 401);
+      return sendUnauthorized(c, 'Invalid email or password');
     }
 
     // Verify password
     const isValidPassword = await verifyPassword(password, user.passwordHash);
     if (!isValidPassword) {
-      return c.json({ 
-        success: false, 
-        error: 'Invalid email or password' 
-      }, 401);
+      return sendUnauthorized(c, 'Invalid email or password');
     }
 
     // Generate JWT token
+    const config = getConfig();
     const token = await generateToken({
       userId: user.id,
       email: user.email,
       plan: user.plan || 'free'
-    }, c.env.JWT_SECRET);
+    }, config.jwt.secret);
 
-    return c.json({
-      success: true,
-      data: {
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          credits: user.credits,
-          plan: user.plan,
-          stripeCustomerId: user.stripeCustomerId,
-          createdAt: user.createdAt
-        }
+    return sendSuccess(c, {
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        plan: user.plan || 'free',
+        credits: user.credits || 0
       }
     });
 
   } catch (error) {
-    console.error('Login error:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Login failed' 
-    }, 500);
+    if (error instanceof ValidationError) {
+      return sendValidationError(c, error.message, error.errors);
+    }
+    return handleError(c, error, 'Login failed');
   }
 });
 
 // Get current user profile
-auth.get('/profile', requireAuth, async (c) => {
+auth.get('/me', requireAuth, async (c) => {
   try {
     const user = c.get('user');
-    const db = createDB(c.env);
-
-    const userProfile = await db.select({
-      id: users.id,
-      email: users.email,
-      name: users.name,
-      credits: users.credits,
-      plan: users.plan,
-      stripeCustomerId: users.stripeCustomerId,
-      createdAt: users.createdAt,
-      updatedAt: users.updatedAt
-    }).from(users).where(eq(users.id, user.userId)).get();
-
-    if (!userProfile) {
-      return c.json({ 
-        success: false, 
-        error: 'User not found' 
-      }, 404);
+    const db = c.get('db');
+    
+    if (!db) {
+      throw new Error('Database not available');
     }
 
-    return c.json({
-      success: true,
-      data: userProfile
+    // Get fresh user data
+    const userData = await db.select().from(users).where(eq(users.id, user.userId)).get();
+    if (!userData) {
+      return sendUnauthorized(c, 'User not found');
+    }
+
+    return sendSuccess(c, {
+      id: userData.id,
+      email: userData.email,
+      name: userData.name,
+      plan: userData.plan || 'free',
+      credits: userData.credits || 0
     });
 
   } catch (error) {
-    console.error('Profile fetch error:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Failed to fetch profile' 
-    }, 500);
+    return handleError(c, error, 'Failed to get user data');
   }
 });
 
 // Update user profile
-auth.put('/profile', requireAuth, zValidator('json', updateUserSchema), async (c) => {
+auth.put('/me', requireAuth, async (c) => {
   try {
     const user = c.get('user');
-    const updateData = c.req.valid('json');
-    const db = createDB(c.env);
-
-    // Check if new email already exists (if email is being updated)
-    if (updateData.email) {
-      const existingUser = await db.select().from(users)
-        .where(eq(users.email, updateData.email)).get();
-      
-      if (existingUser && existingUser.id !== user.userId) {
-        return c.json({ 
-          success: false, 
-          error: 'Email already in use' 
-        }, 409);
-      }
+    const db = c.get('db');
+    
+    if (!db) {
+      throw new Error('Database not available');
     }
+    
+    const body = await validateRequestBody(c, updateUserSchema);
 
-    // Update user
     const updatedUser = await db.update(users)
       .set({
-        ...updateData,
+        ...body,
         updatedAt: new Date().toISOString()
       })
       .where(eq(users.id, user.userId))
       .returning();
 
     if (!updatedUser[0]) {
-      return c.json({ 
-        success: false, 
-        error: 'User not found' 
-      }, 404);
+      return sendUnauthorized(c, 'User not found');
     }
 
-    const { passwordHash, ...userWithoutPassword } = updatedUser[0];
-
-    return c.json({
-      success: true,
-      data: userWithoutPassword
+    return sendSuccess(c, {
+      id: updatedUser[0].id,
+      email: updatedUser[0].email,
+      name: updatedUser[0].name,
+      plan: updatedUser[0].plan || 'free',
+      credits: updatedUser[0].credits || 0
     });
 
   } catch (error) {
-    console.error('Profile update error:', error);
-    return c.json({ 
-      success: false, 
-      error: 'Failed to update profile' 
-    }, 500);
+    if (error instanceof ValidationError) {
+      return sendValidationError(c, error.message, error.errors);
+    }
+    return handleError(c, error, 'Failed to update user');
   }
 });
 

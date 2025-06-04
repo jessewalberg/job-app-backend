@@ -7,6 +7,7 @@ import { requireAuth } from '../lib/auth';
 import { StripeService, PRICING_PLANS, CREDIT_PACKAGES } from '../lib/stripe';
 import { users, payments, subscriptions } from '../db/schema';
 import type { Env, JWTPayload } from '../types/env';
+import { getConfig } from '../lib/config';
 
 const billing = new Hono<{ Bindings: Env; Variables: { user: JWTPayload } }>();
 
@@ -96,7 +97,8 @@ billing.post('/subscribe', zValidator('json', createSubscriptionSchema), async (
     const { planId, successUrl, cancelUrl } = c.req.valid('json');
     const user = c.get('user');
     const db = createDB(c.env);
-    const stripe = new StripeService(c.env.STRIPE_SECRET_KEY);
+    const config = getConfig();
+    const stripe = new StripeService(config.stripe.secretKey);
 
     const plan = PRICING_PLANS[planId];
     if (!plan) {
@@ -156,7 +158,8 @@ billing.post('/purchase-credits', zValidator('json', purchaseCreditsSchema), asy
     const { packageId, successUrl, cancelUrl } = c.req.valid('json');
     const user = c.get('user');
     const db = createDB(c.env);
-    const stripe = new StripeService(c.env.STRIPE_SECRET_KEY);
+    const config = getConfig();
+    const stripe = new StripeService(config.stripe.secretKey);
 
     const creditPackage = CREDIT_PACKAGES[packageId];
     if (!creditPackage) {
@@ -218,7 +221,8 @@ billing.post('/change-plan', zValidator('json', changePlanSchema), async (c) => 
     const { planId } = c.req.valid('json');
     const user = c.get('user');
     const db = createDB(c.env);
-    const stripe = new StripeService(c.env.STRIPE_SECRET_KEY);
+    const config = getConfig();
+    const stripe = new StripeService(config.stripe.secretKey);
 
     const newPlan = PRICING_PLANS[planId];
     if (!newPlan) {
@@ -272,7 +276,8 @@ billing.post('/cancel-subscription', async (c) => {
   try {
     const user = c.get('user');
     const db = createDB(c.env);
-    const stripe = new StripeService(c.env.STRIPE_SECRET_KEY);
+    const config = getConfig();
+    const stripe = new StripeService(config.stripe.secretKey);
 
     // Get user data
     const userData = await db.select().from(users).where(eq(users.id, user.userId)).get();
@@ -319,7 +324,8 @@ billing.post('/portal', async (c) => {
     const user = c.get('user');
     const { returnUrl } = await c.req.json();
     const db = createDB(c.env);
-    const stripe = new StripeService(c.env.STRIPE_SECRET_KEY);
+    const config = getConfig();
+    const stripe = new StripeService(config.stripe.secretKey);
 
     // Get user data
     const userData = await db.select().from(users).where(eq(users.id, user.userId)).get();
